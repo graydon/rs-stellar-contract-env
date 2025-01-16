@@ -606,7 +606,7 @@ fn excessive_logging() -> Result<(), HostError> {
 
     // moderate logging
     {
-        host.clear_module_cache()?;
+        host.forget_module_cache()?;
         host.budget_ref().reset_limits(2_000_000, 500_000)?;
         let res = host.call(
             contract_id_obj,
@@ -626,7 +626,7 @@ fn excessive_logging() -> Result<(), HostError> {
 
     // excessive logging
     {
-        host.clear_module_cache()?;
+        host.forget_module_cache()?;
         host.budget_ref().reset_limits(2_000_000, 500_000)?;
         let res = host.call(
             contract_id_obj,
@@ -648,7 +648,7 @@ fn excessive_logging() -> Result<(), HostError> {
 
     // increasing the shadow budget should make everything happy again
     {
-        host.clear_module_cache()?;
+        host.forget_module_cache()?;
         host.budget_ref().reset_limits(2_000_000, 500_000)?;
         host.set_shadow_budget_limits(2_000_000, 1_000_000)?;
         let res = host.call(

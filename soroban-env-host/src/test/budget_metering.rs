@@ -128,7 +128,7 @@ fn test_vm_fuel_metering() -> Result<(), HostError> {
         .test_budget(cpu_required, mem_required)
         .enable_model(ContractCostType::WasmInsnExec, 6, 0, 0, 0)
         .enable_model(ContractCostType::MemAlloc, 0, 0, 0, 1);
-    host.clear_module_cache()?;
+    host.forget_module_cache()?;
     host.call(id_obj, sym, args)?;
     host.with_budget(|budget| {
         assert_eq!(budget.get_cpu_insns_consumed()?, cpu_required);
@@ -142,7 +142,7 @@ fn test_vm_fuel_metering() -> Result<(), HostError> {
         .test_budget(cpu_required, mem_required)
         .enable_model(ContractCostType::WasmInsnExec, 6, 0, 0, 0)
         .enable_model(ContractCostType::MemAlloc, 0, 0, 0, 1);
-    host.clear_module_cache()?;
+    host.forget_module_cache()?;
     let res = host.try_call(id_obj, sym, args);
     assert!(HostError::result_matches_err(res, budget_err));
     host.with_budget(|budget| {
@@ -157,7 +157,7 @@ fn test_vm_fuel_metering() -> Result<(), HostError> {
         .test_budget(cpu_required, mem_required)
         .enable_model(ContractCostType::WasmInsnExec, 6, 0, 0, 0)
         .enable_model(ContractCostType::MemAlloc, 0, 0, 0, 1);
-    host.clear_module_cache()?;
+    host.forget_module_cache()?;
     let res = host.try_call(id_obj, sym, args);
     assert!(HostError::result_matches_err(res, budget_err));
     host.with_budget(|budget| {

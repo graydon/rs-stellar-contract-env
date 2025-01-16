@@ -217,19 +217,6 @@ impl Host {
             // recording auth mode. This is a no-op for the enforcing mode.
             self.try_borrow_authorization_manager()?
                 .maybe_emulate_authentication(self)?;
-            // See explanation for this line in [crate::vm::Vm::parse_module] -- it exists
-            // to add-back module-parsing costs that were suppressed during the invocation.
-            if self.in_storage_recording_mode()? {
-                if *self.try_borrow_need_to_build_module_cache()? {
-                    // Host function calls that upload Wasm and create contracts
-                    // don't use the module cache and thus don't need to have it
-                    // rebuilt.
-                    self.rebuild_module_cache()?;
-                }
-            }
-            // Reset the flag for building the module cache. This is only relevant
-            // for tests that keep reusing the same host for several invocations.
-            *(self.try_borrow_need_to_build_module_cache_mut()?) = false;
         }
         let mut auth_snapshot = None;
         if let Some(rp) = orp {
@@ -701,16 +688,6 @@ impl Host {
     }
 
     fn instantiate_vm(&self, id: &Hash, wasm_hash: &Hash) -> Result<Rc<Vm>, HostError> {
-        #[cfg(any(test, feature = "recording_mode"))]
-        {
-            if !self.in_storage_recording_mode()? {
-                self.build_module_cache_if_needed()?;
-            } else {
-                *(self.try_borrow_need_to_build_module_cache_mut()?) = true;
-            }
-        }
-        #[cfg(not(any(test, feature = "recording_mode")))]
-        self.build_module_cache_if_needed()?;
         let contract_id = id.metered_clone(self)?;
         let parsed_module = if let Some(cache) = &*self.try_borrow_module_cache()? {
             // Check that storage thinks the entry exists before
@@ -721,7 +698,7 @@ impl Host {
                 .try_borrow_storage_mut()?
                 .has_with_host(&wasm_key, self, None)?
             {
-                cache.get_module(self, wasm_hash)?
+                cache.get_module(wasm_hash)?
             } else {
                 None
             }
@@ -733,8 +710,7 @@ impl Host {
         };
         // We can get here a few ways:
         //
-        //   1. We are running/replaying a protocol that has no
-        //      module cache.
+        //   1. We are in simulation so don't have a module cache.
         //
         //   2. We have a module cache, but it somehow doesn't have
         //      the module requested. This in turn has two
@@ -745,8 +721,10 @@ impl Host {
         //
         //     - User uploaded the wasm _in this transaction_ so we
         //       didn't cache it when starting the transaction (and
-        //       couldn't due to wasmi locking its engine while
-        //       running).
+        //       couldn't add it: additions use a shared wasmi engine
+        //       that owns all the cache entries, and that engine is
+        //       locked while we're running; uploads use a throwaway
+        //       engine for validation purposes).
         //
         //   3. Even more pathological: the module cache was built,
         //      and contained the module, but someone _removed_ the
@@ -767,9 +745,7 @@ impl Host {
         #[cfg(any(test, feature = "recording_mode"))]
         // In recording mode: if a contract was present in the initial snapshot image, it is part of
         // the set of contracts that would have been built into a module cache in enforcing mode;
-        // we want to defer the cost of parsing those (simulating them as cache hits) and then charge
-        // once for each such contract the simulated-module-cache-build that happens at the end of
-        // the frame in [`Self::pop_context`].
+        // we want to suppress the cost of parsing those (simulating them as cache hits).
         //
         // If a contract is _not_ in the initial snapshot image, it's because someone just uploaded
         // it during execution. Those would be cache misses in enforcing mode, and so it is right to
@@ -783,7 +759,7 @@ impl Host {
                 .get_snapshot_value(self, &contact_code_key)?
                 .is_some()
             {
-                crate::vm::ModuleParseCostMode::PossiblyDeferredIfRecording
+                crate::vm::ModuleParseCostMode::SuppressedToEmulateCacheHit
             } else {
                 crate::vm::ModuleParseCostMode::Normal
             }

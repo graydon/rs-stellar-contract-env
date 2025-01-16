@@ -82,12 +82,11 @@ pub struct CoverageScoreboard {
     pub vm_to_vm_calls: usize,
 }
 
-// The soroban 22.x host only supports protocol 22 and later, having
-// adopted a new version of wasmi with a new fuel metering system, it
-// cannot accurately replay earlier contracts. Earlier protocols
-// must run on Soroban 21.x or earlier.
+// The soroban 23.x host only supports protocol 23 and later, having adopted a
+// new module caching system. Earlier protocols must run on Soroban 22.x or
+// earlier.
 
-pub(crate) const MIN_LEDGER_PROTOCOL_VERSION: u32 = 22;
+pub(crate) const MIN_LEDGER_PROTOCOL_VERSION: u32 = 23;
 
 #[derive(Clone, Default)]
 struct HostImpl {
@@ -162,14 +161,6 @@ struct HostImpl {
     #[doc(hidden)]
     #[cfg(any(test, feature = "recording_mode"))]
     suppress_diagnostic_events: RefCell<bool>,
-
-    // This flag marks the call of `build_module_cache` that would happen
-    // in enforcing mode. In recording mode we need to use this flag to
-    // determine whether we need to rebuild module cache after the host
-    // invocation has been done.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "recording_mode"))]
-    need_to_build_module_cache: RefCell<bool>,
 
     #[cfg(any(test, feature = "testutils"))]
     pub(crate) invocation_meter: RefCell<InvocationMeter>,
@@ -324,14 +315,6 @@ impl_checked_borrow_helpers!(
     try_borrow_suppress_diagnostic_events_mut
 );
 
-#[cfg(any(test, feature = "recording_mode"))]
-impl_checked_borrow_helpers!(
-    need_to_build_module_cache,
-    bool,
-    try_borrow_need_to_build_module_cache,
-    try_borrow_need_to_build_module_cache_mut
-);
-
 impl Debug for HostImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "HostImpl(...)")
@@ -380,16 +363,17 @@ impl Host {
             coverage_scoreboard: Default::default(),
             #[cfg(any(test, feature = "recording_mode"))]
             suppress_diagnostic_events: RefCell::new(false),
-            #[cfg(any(test, feature = "recording_mode"))]
-            need_to_build_module_cache: RefCell::new(false),
             #[cfg(any(test, feature = "testutils"))]
             invocation_meter: Default::default(),
         }))
     }
 
+    #[cfg(any(test, feature = "testutils"))]
+    // This builds a module cache instance for just the contracts stored
+    // in the host's storage map, and is used only in testing.
     pub fn build_module_cache_if_needed(&self) -> Result<(), HostError> {
         if self.try_borrow_module_cache()?.is_none() {
-            let cache = ModuleCache::new(self)?;
+            let cache = ModuleCache::new_for_stored_contracts(self)?;
             *self.try_borrow_module_cache_mut()? = Some(cache);
         }
         Ok(())
@@ -397,18 +381,8 @@ impl Host {
 
     // Install a module cache from _outside_ the Host. Doing this is potentially
     // delicate: the cache must contain all contracts that will be run by the
-    // host, and will not be further populated during execution. This is
-    // only allowed if the cache is of "reusable" type, i.e. it was created
-    // using `ModuleCache::new_reusable`.
+    // host, and will not be further populated during execution.
     pub fn set_module_cache(&self, cache: ModuleCache) -> Result<(), HostError> {
-        if !cache.is_reusable() {
-            return Err(self.err(
-                ScErrorType::Context,
-                ScErrorCode::InternalError,
-                "module cache not reusable",
-                &[],
-            ));
-        }
         *self.try_borrow_module_cache_mut()? = Some(cache);
         Ok(())
     }
@@ -438,14 +412,14 @@ impl Host {
     }
 
     #[cfg(any(test, feature = "recording_mode"))]
-    pub fn clear_module_cache(&self) -> Result<(), HostError> {
+    pub fn forget_module_cache(&self) -> Result<(), HostError> {
         *self.try_borrow_module_cache_mut()? = None;
         Ok(())
     }
 
     #[cfg(any(test, feature = "recording_mode"))]
     pub fn rebuild_module_cache(&self) -> Result<(), HostError> {
-        self.clear_module_cache()?;
+        self.forget_module_cache()?;
         self.build_module_cache_if_needed()
     }
 

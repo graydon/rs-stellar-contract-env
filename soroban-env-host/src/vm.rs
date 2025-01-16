@@ -127,15 +127,14 @@ impl Host {
     }
 }
 
-// In one very narrow context -- when recording, and with a module cache -- we
-// defer the cost of parsing a module until we pop a control frame.
-// Unfortunately we have to thread this information from the call site to here.
-// See comment below where this type is used.
+// In one very narrow context -- when recording the invocation of a contract
+// that was _not_ just uploaded, and therefore _should_ have had a cache hit --
+// we suppress the cost of parsing a module, to emulate the cache hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModuleParseCostMode {
     Normal,
     #[cfg(any(test, feature = "recording_mode"))]
-    PossiblyDeferredIfRecording,
+    SuppressedToEmulateCacheHit,
 }
 
 impl Vm {
@@ -196,7 +195,7 @@ impl Vm {
     }
 
     /// Instantiates a VM given the arguments provided in [`Self::new`],
-    /// or [`Self::new_from_module_cache`]
+    /// or [`Self::from_parsed_module`]
     fn instantiate(
         host: &Host,
         contract_id: Hash,
@@ -297,41 +296,36 @@ impl Vm {
         ParsedModule::new_with_isolated_engine(host, wasm, cost_inputs)
     }
 
-    /// This method exists to support [crate::storage::FootprintMode::Recording]
-    /// when running in protocol versions that feature the [ModuleCache].
+    /// This method exists to support simulation of transaction application,
+    /// a.k.a. [crate::storage::FootprintMode::Recording] mode.
     ///
-    /// There are two ways we can get to here:
+    /// With the arrival of long-lived module caches, we no longer charge for
+    /// parsing modules during the majority of _real_ executions, because wasm
+    /// modules are parsed and cached outside the lifecycle of the soroban host
+    /// altogether.
     ///
-    ///   1. When we're running in a protocol that doesn't support the
-    ///   [ModuleCache] at all. In this case, we just parse the module and
-    ///   charge for it as normal.
+    /// But there are some wrinkles to this:
     ///
-    ///   2. When we're in a protocol that _does_ support the [ModuleCache] but
-    ///   are _also_ in [crate::storage::FootprintMode::Recording] mode and
-    ///   _also_ being instantiated from [Host::call_contract_fn]. Then the
-    ///   [ModuleCache] _did not get built_ during host setup (because we had
-    ///   no footprint yet to buid the cache from), so our caller
-    ///   [Host::call_contract_fn] sees no module cache, and so each call winds
-    ///   up calling us here, reparsing each module as it's called, and then
-    ///   throwing it away.
+    ///   1. When a user uploads a new contract, the initial parse happens in a
+    ///      throwaway VM, and is limited by the standard budget. We do this
+    ///      simply to protect the VM from malicious input.
     ///
-    /// When we are in case 2, we don't want to charge for all those reparses:
-    /// we want to charge only for the post-parse instantiations _as if_ we had
-    /// had the cache. The cache will actually be added in [Host::pop_context]
-    /// _after_ a top-level recording-mode invocation completes, by reading the
-    /// storage and parsing all the modules in it, in order to charge for
-    /// parsing each used module _once_ and thereby produce a mostly-correct
-    /// total cost.
+    ///   2. When a user uploads a contract _and invokes it in the same tx_, it
+    ///      is not in the cache yet (the cache is locked during execution) so
+    ///      the execution causes another fresh, charged-for parse. This is
+    ///      correct. A contract is (and should be) cheaper to run after it's
+    ///      been committed to the ledger and cached in the module cache.
+    ///      
+    ///   3. When we are _simulating_ tx apply, we don't want to oblige the
+    ///      simulation environment to always have a reusable fully-populated
+    ///      module cache, so to simulate the "no charge" experience most
+    ///      contract invocations get, we parse on demand and _suppress the
+    ///      cost_ of parsing the module, directing it to the shadow budget
+    ///      instead. That is what this function exists to accomplish.
     ///
-    /// We still charge the reparses to the shadow budget, to avoid a DoS risk,
-    /// and we still charge the instantiations to the real budget, to behave the
-    /// same as if we had a cache.
-    ///
-    /// Finally, for those scratching their head about the overall structure:
-    /// all of this happens as a result of the "module cache" not being
-    /// especially cache-like (i.e. not being populated lazily, on-access). It's
-    /// populated all at once, up front, because wasmi does not allow adding
-    /// modules to an engine that's currently running.
+    ///   4. Unless! If we are simulating the upload-and-immediately-invoke
+    ///      scenario, then we want to _not_ suppress the charge, since it would
+    ///      be charged in the real non-simulated version of the scenario also.
     #[cfg(any(test, feature = "recording_mode"))]
     fn parse_module(
         host: &Host,
@@ -339,12 +333,12 @@ impl Vm {
         cost_inputs: VersionedContractCodeCostInputs,
         cost_mode: ModuleParseCostMode,
     ) -> Result<Arc<ParsedModule>, HostError> {
-        if cost_mode == ModuleParseCostMode::PossiblyDeferredIfRecording {
-            if host.in_storage_recording_mode()? {
-                return host.budget_ref().with_observable_shadow_mode(|| {
-                    ParsedModule::new_with_isolated_engine(host, wasm, cost_inputs)
-                });
-            }
+        // When we're recording, we _might_ want to suppress the cost of parsing
+        // if we're in case 3 above. We can tell by the cost_mode.
+        if cost_mode == ModuleParseCostMode::SuppressedToEmulateCacheHit {
+            return host.budget_ref().with_observable_shadow_mode(|| {
+                ParsedModule::new_with_isolated_engine(host, wasm, cost_inputs)
+            });
         }
         ParsedModule::new_with_isolated_engine(host, wasm, cost_inputs)
     }
