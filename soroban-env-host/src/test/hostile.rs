@@ -526,14 +526,14 @@ fn excessive_logging() -> Result<(), HostError> {
 
     let expected_budget = expect![[r#"
     =================================================================
-    Cpu limit: 2000000; used: 215305
-    Mem limit: 500000; used: 166764
+    Cpu limit: 2000000; used: 214289
+    Mem limit: 500000; used: 166780
     =================================================================
     CostType                           cpu_insns      mem_bytes      
     WasmInsnExec                       300            0              
-    MemAlloc                           17058          67344          
-    MemCpy                             2866           0              
-    MemCmp                             512            0              
+    MemAlloc                           16628          67360          
+    MemCpy                             2328           0              
+    MemCmp                             464            0              
     DispatchHostFunction               310            0              
     VisitObject                        244            0              
     ValSer                             0              0              
@@ -606,7 +606,7 @@ fn excessive_logging() -> Result<(), HostError> {
 
     // moderate logging
     {
-        host.forget_module_cache()?;
+        host.clear_module_cache()?;
         host.budget_ref().reset_limits(2_000_000, 500_000)?;
         let res = host.call(
             contract_id_obj,
@@ -626,7 +626,7 @@ fn excessive_logging() -> Result<(), HostError> {
 
     // excessive logging
     {
-        host.forget_module_cache()?;
+        host.clear_module_cache()?;
         host.budget_ref().reset_limits(2_000_000, 500_000)?;
         let res = host.call(
             contract_id_obj,
@@ -648,7 +648,7 @@ fn excessive_logging() -> Result<(), HostError> {
 
     // increasing the shadow budget should make everything happy again
     {
-        host.forget_module_cache()?;
+        host.clear_module_cache()?;
         host.budget_ref().reset_limits(2_000_000, 500_000)?;
         host.set_shadow_budget_limits(2_000_000, 1_000_000)?;
         let res = host.call(

@@ -371,10 +371,14 @@ impl Host {
     #[cfg(any(test, feature = "testutils"))]
     // This builds a module cache instance for just the contracts stored
     // in the host's storage map, and is used only in testing.
-    pub fn build_module_cache_if_needed(&self) -> Result<(), HostError> {
-        if self.try_borrow_module_cache()?.is_none() {
-            let cache = ModuleCache::new_for_stored_contracts(self)?;
-            *self.try_borrow_module_cache_mut()? = Some(cache);
+    pub fn ensure_module_cache_contains_host_storage_contracts(&self) -> Result<(), HostError> {
+        let mut guard = self.try_borrow_module_cache_mut()?;
+        if let Some(cache) = &*guard {
+            cache.add_stored_contracts(self)?;
+        } else {
+            let cache = ModuleCache::new(self)?;
+            cache.add_stored_contracts(self)?;
+            *guard = Some(cache);
         }
         Ok(())
     }
@@ -412,15 +416,11 @@ impl Host {
     }
 
     #[cfg(any(test, feature = "recording_mode"))]
-    pub fn forget_module_cache(&self) -> Result<(), HostError> {
-        *self.try_borrow_module_cache_mut()? = None;
+    pub fn clear_module_cache(&self) -> Result<(), HostError> {
+        if let Some(cache) = &mut *self.try_borrow_module_cache_mut()? {
+            cache.clear()?;
+        }
         Ok(())
-    }
-
-    #[cfg(any(test, feature = "recording_mode"))]
-    pub fn rebuild_module_cache(&self) -> Result<(), HostError> {
-        self.forget_module_cache()?;
-        self.build_module_cache_if_needed()
     }
 
     pub fn set_source_account(&self, source_account: AccountId) -> Result<(), HostError> {

@@ -1,4 +1,3 @@
-use crate::budget::AsBudget;
 use crate::e2e_invoke::ledger_entry_to_ledger_key;
 use crate::storage::EntryWithLiveUntil;
 use crate::ErrorHandler;
@@ -312,8 +311,6 @@ impl Host {
             self.set_source_account(prev_account)?;
         }
         self.set_auth_manager(prev_auth_manager)?;
-        self.as_budget()
-            .with_shadow_mode(|| self.rebuild_module_cache());
         Ok(contract_address)
     }
 

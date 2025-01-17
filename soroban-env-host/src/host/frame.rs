@@ -7,6 +7,7 @@ use crate::{
         prng::Prng,
     },
     storage::{InstanceStorageMap, StorageMap},
+    vm::ParsedModule,
     xdr::{
         ContractExecutable, ContractIdPreimage, CreateContractArgsV2, Hash, HostFunction,
         HostFunctionType, ScAddress, ScContractInstance, ScErrorCode, ScErrorType, ScVal,
@@ -689,7 +690,7 @@ impl Host {
 
     fn instantiate_vm(&self, id: &Hash, wasm_hash: &Hash) -> Result<Rc<Vm>, HostError> {
         let contract_id = id.metered_clone(self)?;
-        let parsed_module = if let Some(cache) = &*self.try_borrow_module_cache()? {
+        if let Some(cache) = &*self.try_borrow_module_cache()? {
             // Check that storage thinks the entry exists before
             // checking the cache: this seems like overkill but it
             // provides some future-proofing, see below.
@@ -698,16 +699,17 @@ impl Host {
                 .try_borrow_storage_mut()?
                 .has_with_host(&wasm_key, self, None)?
             {
-                cache.get_module(wasm_hash)?
-            } else {
-                None
+                if let Some(parsed_module) = cache.get_module(wasm_hash)? {
+                    return Vm::from_parsed_module_and_wasmi_linker(
+                        self,
+                        contract_id,
+                        parsed_module,
+                        &cache.wasmi_linker,
+                    );
+                }
             }
-        } else {
-            None
         };
-        if let Some(module) = parsed_module {
-            return Vm::from_parsed_module(self, contract_id, module);
-        };
+
         // We can get here a few ways:
         //
         //   1. We are in simulation so don't have a module cache.
@@ -740,36 +742,44 @@ impl Host {
         // own engine. If it doesn't have the wasm, we want to fail
         // with a storage error.
 
-        let (code, costs) = self.retrieve_wasm_from_storage(&wasm_hash)?;
-
         #[cfg(any(test, feature = "recording_mode"))]
         // In recording mode: if a contract was present in the initial snapshot image, it is part of
         // the set of contracts that would have been built into a module cache in enforcing mode;
-        // we want to suppress the cost of parsing those (simulating them as cache hits).
+        // we want to suppress the cost of parsing those (simulating them as module cache hits).
         //
         // If a contract is _not_ in the initial snapshot image, it's because someone just uploaded
         // it during execution. Those would be cache misses in enforcing mode, and so it is right to
         // continue to charge for them as such (charging the parse cost on each call) in recording.
-        let cost_mode = if self.in_storage_recording_mode()? {
-            let contact_code_key = self
-                .budget_ref()
-                .with_observable_shadow_mode(|| self.contract_code_ledger_key(wasm_hash))?;
-            if self
-                .try_borrow_storage()?
-                .get_snapshot_value(self, &contact_code_key)?
-                .is_some()
+        if self.in_storage_recording_mode()? {
+            if let Some((parsed_module, wasmi_linker)) =
+                self.budget_ref().with_observable_shadow_mode(|| {
+                    let wasm_key = self.contract_code_ledger_key(wasm_hash)?;
+                    if self
+                        .try_borrow_storage()?
+                        .get_snapshot_value(self, &wasm_key)?
+                        .is_some()
+                    {
+                        let (code, costs) = self.retrieve_wasm_from_storage(&wasm_hash)?;
+                        let parsed_module =
+                            ParsedModule::new_with_isolated_engine(self, code.as_slice(), costs)?;
+                        let wasmi_linker = parsed_module.make_wasmi_linker(self)?;
+                        Ok(Some((parsed_module, wasmi_linker)))
+                    } else {
+                        Ok(None)
+                    }
+                })?
             {
-                crate::vm::ModuleParseCostMode::SuppressedToEmulateCacheHit
-            } else {
-                crate::vm::ModuleParseCostMode::Normal
+                return Vm::from_parsed_module_and_wasmi_linker(
+                    self,
+                    contract_id,
+                    parsed_module,
+                    &wasmi_linker,
+                );
             }
-        } else {
-            crate::vm::ModuleParseCostMode::Normal
-        };
-        #[cfg(not(any(test, feature = "recording_mode")))]
-        let cost_mode = crate::vm::ModuleParseCostMode::Normal;
+        }
 
-        Vm::new_with_cost_inputs(self, contract_id, code.as_slice(), costs, cost_mode)
+        let (code, costs) = self.retrieve_wasm_from_storage(&wasm_hash)?;
+        Vm::new_with_cost_inputs(self, contract_id, code.as_slice(), costs)
     }
 
     pub(crate) fn get_contract_protocol_version(

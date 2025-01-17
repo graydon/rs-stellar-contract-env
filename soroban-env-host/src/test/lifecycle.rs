@@ -885,6 +885,7 @@ mod cap_54_55_56 {
             storage,
             Budget::default(),
         )?;
+        host.ensure_module_cache_contains_host_storage_contracts()?;
         Ok((host, contract_id))
     }
 
@@ -1089,7 +1090,7 @@ mod cap_54_55_56 {
             OldContractWithNoCostInputs,
         )?;
         // force a module-cache build (this normally happens on first VM call)
-        host.build_module_cache_if_needed()?;
+        host.ensure_module_cache_contains_host_storage_contracts()?;
         let wasm = get_contract_wasm_ref(&host, contract_id);
         let module_cache = host.try_borrow_module_cache()?;
         if let Some(module_cache) = &*module_cache {
@@ -1379,6 +1380,7 @@ mod cap_54_55_56 {
         })?;
 
         host.switch_to_enforcing_storage()?;
+        host.ensure_module_cache_contains_host_storage_contracts()?;
 
         let wasm_bytes = host.bytes_new_from_slice(&wasm_to_upload)?;
         let upload_args = host.vec_new_from_slice(&[wasm_bytes.to_val()])?;

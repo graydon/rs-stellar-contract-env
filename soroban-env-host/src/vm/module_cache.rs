@@ -71,16 +71,18 @@ impl ModuleCacheMap {
         Self::lock_map(&self.0)?.insert(key, value);
         Ok(())
     }
+
+    fn clear(&self) -> Result<(), HostError> {
+        Self::lock_map(&self.0)?.clear();
+        Ok(())
+    }
+
+    fn remove(&self, key: &Hash) -> Result<Option<Arc<ParsedModule>>, HostError> {
+        Ok(Self::lock_map(&self.0)?.remove(key))
+    }
 }
 
 impl ModuleCache {
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn new_for_stored_contracts(host: &Host) -> Result<Self, HostError> {
-        let mut cache = Self::new(host)?;
-        cache.add_stored_contracts(host)?;
-        Ok(cache)
-    }
-
     pub fn new<Ctx: CompilationContext>(context: &Ctx) -> Result<Self, HostError> {
         let wasmi_config = get_wasmi_config(context.as_budget())?;
         let wasmi_engine = wasmi::Engine::new(&wasmi_config);
@@ -94,7 +96,7 @@ impl ModuleCache {
     }
 
     #[cfg(any(test, feature = "testutils"))]
-    pub fn add_stored_contracts(&mut self, host: &Host) -> Result<(), HostError> {
+    pub fn add_stored_contracts(&self, host: &Host) -> Result<(), HostError> {
         use crate::xdr::{ContractCodeEntry, ContractCodeEntryExt, LedgerEntryData, LedgerKey};
         let storage = host.try_borrow_storage()?;
         for (k, v) in storage.map.iter(host.as_budget())? {
@@ -191,5 +193,13 @@ impl ModuleCache {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn remove_module(&self, wasm_hash: &Hash) -> Result<Option<Arc<ParsedModule>>, HostError> {
+        self.modules.remove(wasm_hash)
+    }
+
+    pub fn clear(&self) -> Result<(), HostError> {
+        self.modules.clear()
     }
 }

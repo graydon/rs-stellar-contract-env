@@ -127,16 +127,6 @@ impl Host {
     }
 }
 
-// In one very narrow context -- when recording the invocation of a contract
-// that was _not_ just uploaded, and therefore _should_ have had a cache hit --
-// we suppress the cost of parsing a module, to emulate the cache hit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModuleParseCostMode {
-    Normal,
-    #[cfg(any(test, feature = "recording_mode"))]
-    SuppressedToEmulateCacheHit,
-}
-
 impl Vm {
     /// The maximum number of arguments that can be passed to a VM function.
     pub const MAX_VM_ARGS: usize = 32;
@@ -194,9 +184,9 @@ impl Vm {
         Ok((store, instance, memory))
     }
 
-    /// Instantiates a VM given the arguments provided in [`Self::new`],
-    /// or [`Self::from_parsed_module`]
-    fn instantiate(
+    /// Instantiates a VM given more concrete inputs, called by
+    /// [Vm::new] via [Vm::new_with_cost_inputs].
+    pub fn from_parsed_module_and_wasmi_linker(
         host: &Host,
         contract_id: Hash,
         parsed_module: Arc<ParsedModule>,
@@ -225,21 +215,6 @@ impl Vm {
         }))
     }
 
-    pub fn from_parsed_module(
-        host: &Host,
-        contract_id: Hash,
-        parsed_module: Arc<ParsedModule>,
-    ) -> Result<Rc<Self>, HostError> {
-        let _span = tracy_span!("Vm::from_parsed_module");
-        VmInstantiationTimer::new(host.clone());
-        if let Some(cache) = &*host.try_borrow_module_cache()? {
-            Self::instantiate(host, contract_id, parsed_module, &cache.wasmi_linker)
-        } else {
-            let wasmi_linker = parsed_module.make_wasmi_linker(host)?;
-            Self::instantiate(host, contract_id, parsed_module, &wasmi_linker)
-        }
-    }
-
     /// Constructs a new instance of a [Vm] within the provided [Host],
     /// establishing a new execution context for a contract identified by
     /// `contract_id` with Wasm bytecode provided in `module_wasm_code`.
@@ -263,13 +238,7 @@ impl Vm {
         let cost_inputs = VersionedContractCodeCostInputs::V0 {
             wasm_bytes: wasm.len(),
         };
-        Self::new_with_cost_inputs(
-            host,
-            contract_id,
-            wasm,
-            cost_inputs,
-            ModuleParseCostMode::Normal,
-        )
+        Self::new_with_cost_inputs(host, contract_id, wasm, cost_inputs)
     }
 
     pub(crate) fn new_with_cost_inputs(
@@ -277,70 +246,12 @@ impl Vm {
         contract_id: Hash,
         wasm: &[u8],
         cost_inputs: VersionedContractCodeCostInputs,
-        cost_mode: ModuleParseCostMode,
     ) -> Result<Rc<Self>, HostError> {
         let _span = tracy_span!("Vm::new");
         VmInstantiationTimer::new(host.clone());
-        let parsed_module = Self::parse_module(host, wasm, cost_inputs, cost_mode)?;
+        let parsed_module = ParsedModule::new_with_isolated_engine(host, wasm, cost_inputs)?;
         let wasmi_linker = parsed_module.make_wasmi_linker(host)?;
-        Self::instantiate(host, contract_id, parsed_module, &wasmi_linker)
-    }
-
-    #[cfg(not(any(test, feature = "recording_mode")))]
-    fn parse_module(
-        host: &Host,
-        wasm: &[u8],
-        cost_inputs: VersionedContractCodeCostInputs,
-        _cost_mode: ModuleParseCostMode,
-    ) -> Result<Arc<ParsedModule>, HostError> {
-        ParsedModule::new_with_isolated_engine(host, wasm, cost_inputs)
-    }
-
-    /// This method exists to support simulation of transaction application,
-    /// a.k.a. [crate::storage::FootprintMode::Recording] mode.
-    ///
-    /// With the arrival of long-lived module caches, we no longer charge for
-    /// parsing modules during the majority of _real_ executions, because wasm
-    /// modules are parsed and cached outside the lifecycle of the soroban host
-    /// altogether.
-    ///
-    /// But there are some wrinkles to this:
-    ///
-    ///   1. When a user uploads a new contract, the initial parse happens in a
-    ///      throwaway VM, and is limited by the standard budget. We do this
-    ///      simply to protect the VM from malicious input.
-    ///
-    ///   2. When a user uploads a contract _and invokes it in the same tx_, it
-    ///      is not in the cache yet (the cache is locked during execution) so
-    ///      the execution causes another fresh, charged-for parse. This is
-    ///      correct. A contract is (and should be) cheaper to run after it's
-    ///      been committed to the ledger and cached in the module cache.
-    ///      
-    ///   3. When we are _simulating_ tx apply, we don't want to oblige the
-    ///      simulation environment to always have a reusable fully-populated
-    ///      module cache, so to simulate the "no charge" experience most
-    ///      contract invocations get, we parse on demand and _suppress the
-    ///      cost_ of parsing the module, directing it to the shadow budget
-    ///      instead. That is what this function exists to accomplish.
-    ///
-    ///   4. Unless! If we are simulating the upload-and-immediately-invoke
-    ///      scenario, then we want to _not_ suppress the charge, since it would
-    ///      be charged in the real non-simulated version of the scenario also.
-    #[cfg(any(test, feature = "recording_mode"))]
-    fn parse_module(
-        host: &Host,
-        wasm: &[u8],
-        cost_inputs: VersionedContractCodeCostInputs,
-        cost_mode: ModuleParseCostMode,
-    ) -> Result<Arc<ParsedModule>, HostError> {
-        // When we're recording, we _might_ want to suppress the cost of parsing
-        // if we're in case 3 above. We can tell by the cost_mode.
-        if cost_mode == ModuleParseCostMode::SuppressedToEmulateCacheHit {
-            return host.budget_ref().with_observable_shadow_mode(|| {
-                ParsedModule::new_with_isolated_engine(host, wasm, cost_inputs)
-            });
-        }
-        ParsedModule::new_with_isolated_engine(host, wasm, cost_inputs)
+        Self::from_parsed_module_and_wasmi_linker(host, contract_id, parsed_module, &wasmi_linker)
     }
 
     pub(crate) fn get_memory(&self, host: &Host) -> Result<wasmi::Memory, HostError> {
